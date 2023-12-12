@@ -29,5 +29,3 @@ cifar10-128
 
 Progresses:
 
-[x] Dataset to use: https://www.kaggle.com/datasets/joaopauloschuler/cifar10-128x128-resized-via-cai-super-resolution/data
-This repository contains CIFAR-10 images resized to 128x128 pixels
