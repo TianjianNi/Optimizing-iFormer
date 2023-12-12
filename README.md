@@ -16,16 +16,24 @@ cd cifar10-128/
 
 Modify downloaded data file
 
-cifar10-128
-├── class0
-│   ├── imgxxx.png
-│   └── imgxxx.png
-├── class1
-│   ├── imgxxx.png
-│   ├── imgxxx.png
-│   └── imgxxx.png
-├── ...
-└── class9
+custom_dataset
+|-- train
+|   |-- class0
+|   |   |-- imgxxx.png
+|   |   |-- imgxxx.png
+|   |   |-- ...
+|   |-- class1
+|   |   |-- imgxxx.png
+|   |   |-- imgxxx.png
+|   |   |-- ...
+|   |-- ...
+|   |-- class9
+|       |-- imgxxx.png
+|       |-- imgxxx.png
+|       |-- ...
+|-- test
+    |-- (similar structure as training)
+
 
 Progresses:
 
