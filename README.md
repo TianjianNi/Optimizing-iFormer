@@ -16,21 +16,7 @@ cd cifar10-128/
 
 Modify downloaded data file
 
-│imagenet/
-├──train/
-│  ├── n01440764
-│  │   ├── n01440764_10026.JPEG
-│  │   ├── n01440764_10027.JPEG
-│  │   ├── ......
-│  ├── ......
-├──val/
-│  ├── n01440764
-│  │   ├── ILSVRC2012_val_00000293.JPEG
-│  │   ├── ILSVRC2012_val_00002138.JPEG
-│  │   ├── ......
-│  ├── ......
-
-custom_dataset
+cifar10-128
 |-- train
 |   |-- class0
 |   |   |-- imgxxx.png
@@ -46,7 +32,7 @@ custom_dataset
 |       |-- imgxxx.png
 |       |-- ...
 |-- test
-    |-- (similar structure as training)
+    |-- (similar structure as train)
 
 
 Progresses:
