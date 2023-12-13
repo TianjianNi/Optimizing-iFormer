@@ -34,6 +34,26 @@ cifar10-128
 |-- test
     |-- (similar structure as train)
 
+Results
 
-Progresses:
+Benchmark:
+Epoch 5/5 
+Data loading time (sec) is 68.025
+Training time (sec) is 367.235
+Running time (sec) is 435.714
+Accuracy is 75.972%
+
+DP 4GPU:
+Epoch 5/5 
+Data loading time (sec) is 43.091
+Training time (sec) is 130.066
+Running time (sec) is 174.626
+Accuracy is 76.298%
+
+DDP 4GPU:
+Epoch 5/5 
+Data loading time (sec) is 15.763
+Training time (sec) is 105.363
+Running time (sec) is 123.452
+Accuracy is 72.048%
 
