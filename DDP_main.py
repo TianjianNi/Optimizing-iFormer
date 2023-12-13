@@ -15,6 +15,10 @@ from torch.utils.data import Dataset
 from dataset import Customized_CIFAR10_Dataset
 from model import iformer_small
 
+from dotenv import load_dotenv
+
+load_dotenv()
+DATA_PATH = os.getenv('DATA_PATH')
 
 # Code reference: https://github.com/pytorch/examples/blob/main/distributed/ddp/README.md
 def setup(rank, world_size):
@@ -112,7 +116,7 @@ if __name__ == "__main__":
                         help='Batch size for training')
     parser.add_argument("--num_workers", type=int, default=4,
                         help='Number of dataloader workers')
-    parser.add_argument('--data_path', type=str, default='/scratch/tn2151/project/cifar10-128',
+    parser.add_argument('--data_path', type=str, default=DATA_PATH,
                         help='Path to the training data')
     parser.add_argument("--epochs", type=int, default=5,
                         help='Use the first 4 epochs as warmup')
