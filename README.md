@@ -1,6 +1,6 @@
 # Optimizing-iFormer
 
-In this experiment, we aim to enhance the iFormer training process by incorporating Distributed Data Parallelism, Model Parallelism, and DL Pipelining.
+In this experiment, we aim to enhance the iFormer training process by incorporating Data Parallelism, Distributed Data Parallelism, Model Parallelism, and DL Pipelining.
 
 ## 1. Data setup
 
