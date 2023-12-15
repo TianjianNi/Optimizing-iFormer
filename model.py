@@ -663,3 +663,193 @@ def iformer_large_384(pretrained=False, **kwargs):
         checkpoint = torch.hub.load_state_dict_from_url(url=url, map_location="cpu", check_hash=True)
         model.load_state_dict(checkpoint)
     return model
+
+
+class MpInceptionTransformer(nn.Module):
+    def __init__(self,
+                 dev0, dev1, dev2, dev3,
+                 img_size=224, patch_size=16, in_chans=3, num_classes=1000, embed_dims=None, depths=None,
+                 num_heads=None, mlp_ratio=4., qkv_bias=True,
+                 drop_rate=0., attn_drop_rate=0., drop_path_rate=0., embed_layer=PatchEmbed, norm_layer=None,
+                 act_layer=None, weight_init='',
+                 attention_heads=None,
+                 use_layer_scale=False, layer_scale_init_value=1e-5,
+                 checkpoint_path=None,
+                 **kwargs,
+                 ):
+
+        super().__init__()
+        st2_idx = sum(depths[:1])
+        st3_idx = sum(depths[:2])
+        st4_idx = sum(depths[:3])
+        depth = sum(depths)
+
+        self.dev0 = dev0
+        self.dev1 = dev1
+        self.dev2 = dev2
+        self.dev3 = dev3
+
+        self.num_classes = num_classes
+
+        norm_layer = norm_layer or partial(nn.LayerNorm, eps=1e-6)
+        act_layer = act_layer or nn.GELU
+
+        dpr = [x.item() for x in torch.linspace(0, drop_path_rate, depth)]  # stochastic depth decay rule
+
+        self.patch_embed = FirstPatchEmbed(in_chans=in_chans, embed_dim=embed_dims[0]).to(self.dev0)
+        self.num_patches1 = num_patches = img_size // 4
+        self.pos_embed1 = nn.Parameter(torch.zeros(1, num_patches, num_patches, embed_dims[0])).to(self.dev0)
+        self.blocks1 = nn.Sequential(*[
+            Block(
+                dim=embed_dims[0], num_heads=num_heads[0], mlp_ratio=mlp_ratio, qkv_bias=qkv_bias, drop=drop_rate,
+                attn_drop=attn_drop_rate, drop_path=dpr[i], norm_layer=norm_layer, act_layer=act_layer,
+                attention_head=attention_heads[i], pool_size=2, ).to(self.dev0)
+            # use_layer_scale=use_layer_scale, layer_scale_init_value=layer_scale_init_value,
+            # )
+            for i in range(0, st2_idx)])
+
+        self.patch_embed2 = embed_layer(kernel_size=3, stride=2, padding=1, in_chans=embed_dims[0],
+                                        embed_dim=embed_dims[1]).to(self.dev1)
+        self.num_patches2 = num_patches = num_patches // 2
+        self.pos_embed2 = nn.Parameter(torch.zeros(1, num_patches, num_patches, embed_dims[1])).to(self.dev1)
+        self.blocks2 = nn.Sequential(*[
+            Block(
+                dim=embed_dims[1], num_heads=num_heads[1], mlp_ratio=mlp_ratio, qkv_bias=qkv_bias, drop=drop_rate,
+                attn_drop=attn_drop_rate, drop_path=dpr[i], norm_layer=norm_layer, act_layer=act_layer,
+                attention_head=attention_heads[i], pool_size=2, ).to(self.dev1)
+            # use_layer_scale=use_layer_scale, layer_scale_init_value=layer_scale_init_value, channel_layer_scale=channel_layer_scale,
+            # )
+            for i in range(st2_idx, st3_idx)])
+
+        self.patch_embed3 = embed_layer(kernel_size=3, stride=2, padding=1, in_chans=embed_dims[1],
+                                        embed_dim=embed_dims[2]).to(self.dev2)
+        self.num_patches3 = num_patches = num_patches // 2
+        self.pos_embed3 = nn.Parameter(torch.zeros(1, num_patches, num_patches, embed_dims[2])).to(self.dev2)
+        self.blocks3 = nn.Sequential(*[
+            Block(
+                dim=embed_dims[2], num_heads=num_heads[2], mlp_ratio=mlp_ratio, qkv_bias=qkv_bias, drop=drop_rate,
+                attn_drop=attn_drop_rate, drop_path=dpr[i], norm_layer=norm_layer, act_layer=act_layer,
+                attention_head=attention_heads[i], pool_size=1,
+                use_layer_scale=use_layer_scale, layer_scale_init_value=layer_scale_init_value,
+            ).to(self.dev2)
+            for i in range(st3_idx, st4_idx)])
+
+        self.patch_embed4 = embed_layer(kernel_size=3, stride=2, padding=1, in_chans=embed_dims[2],
+                                        embed_dim=embed_dims[3]).to(self.dev3)
+        self.num_patches4 = num_patches = num_patches // 2
+        self.pos_embed4 = nn.Parameter(torch.zeros(1, num_patches, num_patches, embed_dims[3])).to(self.dev3)
+        self.blocks4 = nn.Sequential(*[
+            Block(
+                dim=embed_dims[3], num_heads=num_heads[3], mlp_ratio=mlp_ratio, qkv_bias=qkv_bias, drop=drop_rate,
+                attn_drop=attn_drop_rate, drop_path=dpr[i], norm_layer=norm_layer, act_layer=act_layer,
+                attention_head=attention_heads[i], pool_size=1,
+                use_layer_scale=use_layer_scale, layer_scale_init_value=layer_scale_init_value,
+            ).to(self.dev3)
+            for i in range(st4_idx, depth)])
+
+        self.norm = norm_layer(embed_dims[-1])
+        # Classifier head(s)
+        self.head = nn.Linear(embed_dims[-1], num_classes) if num_classes > 0 else nn.Identity()
+        # set post block, for example, class attention layers
+
+        self.init_weights(weight_init)
+
+    def init_weights(self, mode=''):
+        trunc_normal_(self.pos_embed1, std=.02)
+        trunc_normal_(self.pos_embed2, std=.02)
+        trunc_normal_(self.pos_embed3, std=.02)
+        trunc_normal_(self.pos_embed4, std=.02)
+
+        self.apply(_init_vit_weights)
+
+    def _init_weights(self, m):
+        # this fn left here for compat with downstream users
+        _init_vit_weights(m)
+
+    @torch.jit.ignore
+    def no_weight_decay(self):
+        return {'pos_embed', 'cls_token', 'dist_token'}
+
+    def get_classifier(self):
+        if self.dist_token is None:
+            return self.head
+        else:
+            return self.head, self.head_dist
+
+    def reset_classifier(self, num_classes, global_pool=''):
+        self.num_classes = num_classes
+        self.head = nn.Linear(self.embed_dim, num_classes) if num_classes > 0 else nn.Identity()
+        if self.num_tokens == 2:
+            self.head_dist = nn.Linear(self.embed_dim, self.num_classes) if num_classes > 0 else nn.Identity()
+
+    def _get_pos_embed(self, pos_embed, num_patches_def, H, W):
+        if H * W == num_patches_def * num_patches_def:
+            return pos_embed
+        else:
+            return F.interpolate(
+                pos_embed.permute(0, 3, 1, 2),
+                size=(H, W), mode="bilinear").permute(0, 2, 3, 1)
+
+    def forward_features(self, x):
+        x = self.patch_embed(x)
+        B, H, W, C = x.shape
+        x = x + self._get_pos_embed(self.pos_embed1, self.num_patches1, H, W)
+        x = self.blocks1(x)
+
+        x = x.permute(0, 3, 1, 2).to(self.dev1)
+        x = self.patch_embed2(x)
+        B, H, W, C = x.shape
+        x = x + self._get_pos_embed(self.pos_embed2, self.num_patches2, H, W)
+        x = self.blocks2(x)
+
+        x = x.permute(0, 3, 1, 2).to(self.dev2)
+        x = self.patch_embed3(x)
+        B, H, W, C = x.shape
+        x = x + self._get_pos_embed(self.pos_embed3, self.num_patches3, H, W)
+        x = self.blocks3(x)
+
+        x = x.permute(0, 3, 1, 2).to(self.dev3)
+        x = self.patch_embed4(x)
+        B, H, W, C = x.shape
+        x = x + self._get_pos_embed(self.pos_embed4, self.num_patches4, H, W)
+        x = self.blocks4(x)
+        x = x.flatten(1, 2)
+
+        x = x.to(self.dev0)
+        x = self.norm(x)
+        return x.mean(1)
+
+    def forward(self, x):
+        x = self.forward_features(x)
+        x = self.head(x)
+        return x
+
+
+@register_model
+def mp_iformer_small(dev0, dev1, dev2, dev3, pretrained=False, **kwargs):
+    """
+    19.866M  4.849G 83.382
+    """
+    depths = [3, 3, 9, 3]
+    embed_dims = [96, 192, 320, 384]
+    num_heads = [3, 6, 10, 12]
+    attention_heads = [1] * 3 + [3] * 3 + [7] * 4 + [9] * 5 + [11] * 3
+
+    model = MpInceptionTransformer(
+                                 dev0 = dev0, 
+                                 dev1 = dev1,
+                                 dev2 = dev2,
+                                 dev3 = dev3,
+                                 img_size=224,
+                                 depths=depths,
+                                 embed_dims=embed_dims,
+                                 num_heads=num_heads,
+                                 attention_heads=attention_heads,
+                                 use_layer_scale=True, layer_scale_init_value=1e-6,
+                                 **kwargs)
+    model.default_cfg = default_cfgs['iformer_small']
+    if pretrained:
+        url = model.default_cfg['url']
+        checkpoint = torch.hub.load_state_dict_from_url(url=url, map_location="cpu", check_hash=True)
+        model.load_state_dict(checkpoint)
+    return model
