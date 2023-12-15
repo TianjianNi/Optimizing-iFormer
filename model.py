@@ -34,6 +34,7 @@ from torch.nn.init import _calculate_fan_in_and_fan_out
 import math
 import warnings
 from timm.layers.helpers import to_2tuple
+from itertools import islice
 
 _logger = logging.getLogger(__name__)
 
@@ -675,6 +676,7 @@ class MpInceptionTransformer(nn.Module):
                  attention_heads=None,
                  use_layer_scale=False, layer_scale_init_value=1e-5,
                  checkpoint_path=None,
+                 split_size=4,
                  **kwargs,
                  ):
 
@@ -688,6 +690,8 @@ class MpInceptionTransformer(nn.Module):
         self.dev1 = dev1
         self.dev2 = dev2
         self.dev3 = dev3
+
+        self.split_size = split_size
 
         self.num_classes = num_classes
 
@@ -790,24 +794,31 @@ class MpInceptionTransformer(nn.Module):
                 pos_embed.permute(0, 3, 1, 2),
                 size=(H, W), mode="bilinear").permute(0, 2, 3, 1)
 
-    def forward_features(self, x):
+    def forward_features_1(self, x):
+        x = x.to(self.dev0)
         x = self.patch_embed(x)
         B, H, W, C = x.shape
         x = x + self._get_pos_embed(self.pos_embed1, self.num_patches1, H, W)
         x = self.blocks1(x)
+        return x
 
+    def forward_features_2(self, x):
         x = x.permute(0, 3, 1, 2).to(self.dev1)
         x = self.patch_embed2(x)
         B, H, W, C = x.shape
         x = x + self._get_pos_embed(self.pos_embed2, self.num_patches2, H, W)
         x = self.blocks2(x)
+        return x
 
+    def forward_features_3(self, x):
         x = x.permute(0, 3, 1, 2).to(self.dev2)
         x = self.patch_embed3(x)
         B, H, W, C = x.shape
         x = x + self._get_pos_embed(self.pos_embed3, self.num_patches3, H, W)
         x = self.blocks3(x)
+        return x
 
+    def forward_features_4(self, x):
         x = x.permute(0, 3, 1, 2).to(self.dev3)
         x = self.patch_embed4(x)
         B, H, W, C = x.shape
@@ -820,9 +831,21 @@ class MpInceptionTransformer(nn.Module):
         return x.mean(1)
 
     def forward(self, x):
-        x = self.forward_features(x)
-        x = self.head(x)
-        return x
+        x_split = torch.split(x, self.split_size, dim=0)
+        outputs = []
+
+        # Forward pass on each split batch in parallel
+        for x_batch in x_split:
+            x1 = self.forward_features_1(x_batch)
+            x2 = self.forward_features_2(x1)
+            x3 = self.forward_features_3(x2)
+            x4 = self.forward_features_4(x3)
+            outputs.append(x4)
+
+        output = torch.cat(outputs, dim=0)
+        final_output = self.head(output)
+
+        return final_output
 
 
 @register_model
