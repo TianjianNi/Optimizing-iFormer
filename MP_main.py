@@ -36,7 +36,7 @@ def train(args):
     data_loader = torch.utils.data.DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=num_workers)
 
     if torch.cuda.device_count() >= 4:
-        print("Model parallel with 4 GPUs - we have", torch.cuda.device_count(), "GPUs")
+        print("Pipeline with 4 GPUs - we have", torch.cuda.device_count(), "GPUs")
     else:
         print("Not enough GPUs")
         return
@@ -46,18 +46,7 @@ def train(args):
     dev2 = torch.device("cuda:2")
     dev3 = torch.device("cuda:3")
 
-    model = mp_iformer_small(pretrained=False)   
-
-    # Move the model to the devices
-    model = model.to(dev0)
-    model.patch_embed = model.patch_embed.to(dev0)
-    model.blocks1 = model.blocks1.to(dev0)
-    model.patch_embed2 = model.patch_embed2.to(dev1)
-    model.blocks2 = model.blocks2.to(dev1)
-    model.patch_embed3 = model.patch_embed3.to(dev2)
-    model.blocks3 = model.blocks3.to(dev2)
-    model.patch_embed4 = model.patch_embed4.to(dev3)
-    model.blocks4 = model.blocks4.to(dev3) 
+    model = mp_iformer_small(dev0, dev1, dev2, dev3, pretrained=False)
 
     optimizer = optim.AdamW(model.parameters(), lr=lr, betas=betas, eps=eps, weight_decay=weight_decay)
     criterion = nn.CrossEntropyLoss()
