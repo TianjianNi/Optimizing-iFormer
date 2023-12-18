@@ -10,7 +10,7 @@ from torchvision import transforms
 from torch.utils.data import Dataset
 
 from dataset import Customized_CIFAR10_Dataset
-from model import mp_iformer_small
+from model import pipe_iformer_small
 
 from dotenv import load_dotenv
 
@@ -46,7 +46,7 @@ def train(args):
     dev2 = torch.device("cuda:2")
     dev3 = torch.device("cuda:3")
 
-    model = mp_iformer_small(dev0, dev1, dev2, dev3, pretrained=False)
+    model = pipe_iformer_small(dev0, dev1, dev2, dev3, pretrained=False)
 
     optimizer = optim.AdamW(model.parameters(), lr=lr, betas=betas, eps=eps, weight_decay=weight_decay)
     criterion = nn.CrossEntropyLoss()

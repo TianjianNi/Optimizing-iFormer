@@ -34,7 +34,8 @@ from torch.nn.init import _calculate_fan_in_and_fan_out
 import math
 import warnings
 from timm.layers.helpers import to_2tuple
-from itertools import islice
+
+from torch.distributed.pipeline.sync import Pipe
 
 _logger = logging.getLogger(__name__)
 
@@ -665,8 +666,8 @@ def iformer_large_384(pretrained=False, **kwargs):
         model.load_state_dict(checkpoint)
     return model
 
-
-class MpInceptionTransformer(nn.Module):
+class PipeInceptionTransformer(nn.Module):
+    # Forward pipelining for 4 GPUs
     def __init__(self,
                  dev0, dev1, dev2, dev3,
                  img_size=224, patch_size=16, in_chans=3, num_classes=1000, embed_dims=None, depths=None,
@@ -676,7 +677,6 @@ class MpInceptionTransformer(nn.Module):
                  attention_heads=None,
                  use_layer_scale=False, layer_scale_init_value=1e-5,
                  checkpoint_path=None,
-                 split_size=4,
                  **kwargs,
                  ):
 
@@ -690,8 +690,6 @@ class MpInceptionTransformer(nn.Module):
         self.dev1 = dev1
         self.dev2 = dev2
         self.dev3 = dev3
-
-        self.split_size = split_size
 
         self.num_classes = num_classes
 
@@ -757,6 +755,20 @@ class MpInceptionTransformer(nn.Module):
         # set post block, for example, class attention layers
 
         self.init_weights(weight_init)
+
+        self.to(dev0)
+        self.patch_embed = self.patch_embed.to(dev0)
+        self.pos_embed1 = self.pos_embed1.to(dev0)
+        self.blocks1 = self.blocks1.to(dev0)
+        self.patch_embed2 = self.patch_embed2.to(dev1)
+        self.pos_embed2 = self.pos_embed2.to(dev1)
+        self.blocks2 = self.blocks2.to(dev1)
+        self.patch_embed3 = self.patch_embed3.to(dev2)
+        self.pos_embed3 = self.pos_embed3.to(dev2)
+        self.blocks3 = self.blocks3.to(dev2)
+        self.patch_embed4 = self.patch_embed4.to(dev3)
+        self.pos_embed4 = self.pos_embed4.to(dev3)
+        self.blocks4 = self.blocks4.to(dev3)
 
     def init_weights(self, mode=''):
         trunc_normal_(self.pos_embed1, std=.02)
@@ -831,25 +843,41 @@ class MpInceptionTransformer(nn.Module):
         return x.mean(1)
 
     def forward(self, x):
-        x_split = torch.split(x, self.split_size, dim=0)
+        # *** Not using ThreadPoolExecutor is actually faster ***
+
+        split_size = 20
+        x_split = torch.split(x, split_size, dim=0)
+        x_split_iter = iter(x_split)
         outputs = []
 
-        # Forward pass on each split batch in parallel
-        for x_batch in x_split:
-            x1 = self.forward_features_1(x_batch)
-            x2 = self.forward_features_2(x1)
-            x3 = self.forward_features_3(x2)
-            x4 = self.forward_features_4(x3)
-            outputs.append(x4)
+        # we have four layers, so using x1, x2, x3 as intermediate results
+        # x3 is output from the 3rd layer, cloest to the output and x1 is cloest to the input
+        x1 = self.forward_features_1(next(x_split_iter))
+        x2 = x3 = None
+
+        while x1 != None or x2 != None or x3 != None:
+            if x3 != None:
+                outputs.append(self.forward_features_4(x3))
+                x3 = None
+
+            if x2 != None:
+                x3 = self.forward_features_3(x2)
+                x2 = None
+
+            if x1 != None:
+                x2 = self.forward_features_2(x1)
+                try:
+                    x1 = self.forward_features_1(next(x_split_iter))
+                except:
+                    x1 = None
 
         output = torch.cat(outputs, dim=0)
         final_output = self.head(output)
 
         return final_output
 
-
 @register_model
-def mp_iformer_small(dev0, dev1, dev2, dev3, pretrained=False, **kwargs):
+def pipe_iformer_small(dev0, dev1, dev2, dev3, pretrained=False, **kwargs):
     """
     19.866M  4.849G 83.382
     """
@@ -858,8 +886,8 @@ def mp_iformer_small(dev0, dev1, dev2, dev3, pretrained=False, **kwargs):
     num_heads = [3, 6, 10, 12]
     attention_heads = [1] * 3 + [3] * 3 + [7] * 4 + [9] * 5 + [11] * 3
 
-    model = MpInceptionTransformer(
-                                 dev0 = dev0, 
+    model = PipeInceptionTransformer(
+                                 dev0 = dev0,
                                  dev1 = dev1,
                                  dev2 = dev2,
                                  dev3 = dev3,
