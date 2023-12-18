@@ -668,9 +668,10 @@ def iformer_large_384(pretrained=False, **kwargs):
 
 class PipeInceptionTransformer(nn.Module):
     # Forward pipelining for 4 GPUs
+    # In official implementation, default num_classes was 1000
     def __init__(self,
                  dev0, dev1, dev2, dev3,
-                 img_size=224, patch_size=16, in_chans=3, num_classes=1000, embed_dims=None, depths=None,
+                 img_size=224, patch_size=16, in_chans=3, num_classes=10, embed_dims=None, depths=None,
                  num_heads=None, mlp_ratio=4., qkv_bias=True,
                  drop_rate=0., attn_drop_rate=0., drop_path_rate=0., embed_layer=PatchEmbed, norm_layer=None,
                  act_layer=None, weight_init='',
@@ -844,7 +845,6 @@ class PipeInceptionTransformer(nn.Module):
 
     def forward(self, x):
         # *** Not using ThreadPoolExecutor is actually faster ***
-
         split_size = 20
         x_split = torch.split(x, split_size, dim=0)
         x_split_iter = iter(x_split)
