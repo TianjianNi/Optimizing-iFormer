@@ -40,6 +40,7 @@ from torch.distributed.pipeline.sync import Pipe
 _logger = logging.getLogger(__name__)
 
 
+# TODO: cleanup
 def _cfg(url='', **kwargs):
     return {
         'url': url,
@@ -347,10 +348,36 @@ class Block(nn.Module):
         return x
 
 
-# In official implementation, default num_classes was 1000
-class InceptionTransformer(nn.Module):
-    def __init__(self, img_size=224, patch_size=16, in_chans=3, num_classes=10,
-                 embed_dims=None, depths=None,
+def _init_vit_weights(module: nn.Module, name: str = '', head_bias: float = 0.):
+    """ ViT weight initialization
+    * When called without n, head_bias, jax_impl args it will behave exactly the same
+      as my original init for compatibility with prev hparam / downstream use cases (ie DeiT).
+    """
+    if isinstance(module, nn.Linear):
+        if name.startswith('head'):
+            nn.init.zeros_(module.weight)
+            nn.init.constant_(module.bias, head_bias)
+        elif name.startswith('pre_logits'):
+            lecun_normal_(module.weight)
+            nn.init.zeros_(module.bias)
+        else:
+            trunc_normal_(module.weight, std=.02)
+            if module.bias is not None:
+                nn.init.zeros_(module.bias)
+    elif isinstance(module, (nn.LayerNorm, nn.GroupNorm, nn.BatchNorm2d)):
+        nn.init.zeros_(module.bias)
+        nn.init.ones_(module.weight)
+    elif isinstance(module, nn.Conv2d):
+        trunc_normal_(module.weight, std=.02)
+        if module.bias is not None:
+            nn.init.constant_(module.bias, 0)
+
+class PipeInceptionTransformer(nn.Module):
+    # Forward pipelining for 4 GPUs
+    # In official implementation, default num_classes was 1000
+    def __init__(self,
+                 dev0, dev1, dev2, dev3,
+                 img_size=224, patch_size=16, in_chans=3, num_classes=10, embed_dims=None, depths=None,
                  num_heads=None, mlp_ratio=4., qkv_bias=True,
                  drop_rate=0., attn_drop_rate=0., drop_path_rate=0., embed_layer=PatchEmbed, norm_layer=None,
                  act_layer=None, weight_init='',
@@ -366,6 +393,11 @@ class InceptionTransformer(nn.Module):
         st4_idx = sum(depths[:3])
         depth = sum(depths)
 
+        self.dev0 = dev0
+        self.dev1 = dev1
+        self.dev2 = dev2
+        self.dev3 = dev3
+
         self.num_classes = num_classes
 
         norm_layer = norm_layer or partial(nn.LayerNorm, eps=1e-6)
@@ -373,55 +405,55 @@ class InceptionTransformer(nn.Module):
 
         dpr = [x.item() for x in torch.linspace(0, drop_path_rate, depth)]  # stochastic depth decay rule
 
-        self.patch_embed = FirstPatchEmbed(in_chans=in_chans, embed_dim=embed_dims[0])
+        self.patch_embed = FirstPatchEmbed(in_chans=in_chans, embed_dim=embed_dims[0]).to(self.dev0)
         self.num_patches1 = num_patches = img_size // 4
-        self.pos_embed1 = nn.Parameter(torch.zeros(1, num_patches, num_patches, embed_dims[0]))
+        self.pos_embed1 = nn.Parameter(torch.zeros(1, num_patches, num_patches, embed_dims[0])).to(self.dev0)
         self.blocks1 = nn.Sequential(*[
             Block(
                 dim=embed_dims[0], num_heads=num_heads[0], mlp_ratio=mlp_ratio, qkv_bias=qkv_bias, drop=drop_rate,
                 attn_drop=attn_drop_rate, drop_path=dpr[i], norm_layer=norm_layer, act_layer=act_layer,
-                attention_head=attention_heads[i], pool_size=2, )
+                attention_head=attention_heads[i], pool_size=2, ).to(self.dev0)
             # use_layer_scale=use_layer_scale, layer_scale_init_value=layer_scale_init_value,
             # )
             for i in range(0, st2_idx)])
 
         self.patch_embed2 = embed_layer(kernel_size=3, stride=2, padding=1, in_chans=embed_dims[0],
-                                        embed_dim=embed_dims[1])
+                                        embed_dim=embed_dims[1]).to(self.dev1)
         self.num_patches2 = num_patches = num_patches // 2
-        self.pos_embed2 = nn.Parameter(torch.zeros(1, num_patches, num_patches, embed_dims[1]))
+        self.pos_embed2 = nn.Parameter(torch.zeros(1, num_patches, num_patches, embed_dims[1])).to(self.dev1)
         self.blocks2 = nn.Sequential(*[
             Block(
                 dim=embed_dims[1], num_heads=num_heads[1], mlp_ratio=mlp_ratio, qkv_bias=qkv_bias, drop=drop_rate,
                 attn_drop=attn_drop_rate, drop_path=dpr[i], norm_layer=norm_layer, act_layer=act_layer,
-                attention_head=attention_heads[i], pool_size=2, )
+                attention_head=attention_heads[i], pool_size=2, ).to(self.dev1)
             # use_layer_scale=use_layer_scale, layer_scale_init_value=layer_scale_init_value, channel_layer_scale=channel_layer_scale,
             # )
             for i in range(st2_idx, st3_idx)])
 
         self.patch_embed3 = embed_layer(kernel_size=3, stride=2, padding=1, in_chans=embed_dims[1],
-                                        embed_dim=embed_dims[2])
+                                        embed_dim=embed_dims[2]).to(self.dev2)
         self.num_patches3 = num_patches = num_patches // 2
-        self.pos_embed3 = nn.Parameter(torch.zeros(1, num_patches, num_patches, embed_dims[2]))
+        self.pos_embed3 = nn.Parameter(torch.zeros(1, num_patches, num_patches, embed_dims[2])).to(self.dev2)
         self.blocks3 = nn.Sequential(*[
             Block(
                 dim=embed_dims[2], num_heads=num_heads[2], mlp_ratio=mlp_ratio, qkv_bias=qkv_bias, drop=drop_rate,
                 attn_drop=attn_drop_rate, drop_path=dpr[i], norm_layer=norm_layer, act_layer=act_layer,
                 attention_head=attention_heads[i], pool_size=1,
                 use_layer_scale=use_layer_scale, layer_scale_init_value=layer_scale_init_value,
-            )
+            ).to(self.dev2)
             for i in range(st3_idx, st4_idx)])
 
         self.patch_embed4 = embed_layer(kernel_size=3, stride=2, padding=1, in_chans=embed_dims[2],
-                                        embed_dim=embed_dims[3])
+                                        embed_dim=embed_dims[3]).to(self.dev3)
         self.num_patches4 = num_patches = num_patches // 2
-        self.pos_embed4 = nn.Parameter(torch.zeros(1, num_patches, num_patches, embed_dims[3]))
+        self.pos_embed4 = nn.Parameter(torch.zeros(1, num_patches, num_patches, embed_dims[3])).to(self.dev3)
         self.blocks4 = nn.Sequential(*[
             Block(
                 dim=embed_dims[3], num_heads=num_heads[3], mlp_ratio=mlp_ratio, qkv_bias=qkv_bias, drop=drop_rate,
                 attn_drop=attn_drop_rate, drop_path=dpr[i], norm_layer=norm_layer, act_layer=act_layer,
                 attention_head=attention_heads[i], pool_size=1,
                 use_layer_scale=use_layer_scale, layer_scale_init_value=layer_scale_init_value,
-            )
+            ).to(self.dev3)
             for i in range(st4_idx, depth)])
 
         self.norm = norm_layer(embed_dims[-1])
@@ -430,6 +462,20 @@ class InceptionTransformer(nn.Module):
         # set post block, for example, class attention layers
 
         self.init_weights(weight_init)
+
+        self.to(dev0)
+        self.patch_embed = self.patch_embed.to(dev0)
+        self.pos_embed1 = self.pos_embed1.to(dev0)
+        self.blocks1 = self.blocks1.to(dev0)
+        self.patch_embed2 = self.patch_embed2.to(dev1)
+        self.pos_embed2 = self.pos_embed2.to(dev1)
+        self.blocks2 = self.blocks2.to(dev1)
+        self.patch_embed3 = self.patch_embed3.to(dev2)
+        self.pos_embed3 = self.pos_embed3.to(dev2)
+        self.blocks3 = self.blocks3.to(dev2)
+        self.patch_embed4 = self.patch_embed4.to(dev3)
+        self.pos_embed4 = self.pos_embed4.to(dev3)
+        self.blocks4 = self.blocks4.to(dev3)
 
     def init_weights(self, mode=''):
         trunc_normal_(self.pos_embed1, std=.02)
@@ -467,67 +513,77 @@ class InceptionTransformer(nn.Module):
                 pos_embed.permute(0, 3, 1, 2),
                 size=(H, W), mode="bilinear").permute(0, 2, 3, 1)
 
-    def forward_features(self, x):
+    def forward_features_1(self, x):
+        x = x.to(self.dev0)
         x = self.patch_embed(x)
         B, H, W, C = x.shape
         x = x + self._get_pos_embed(self.pos_embed1, self.num_patches1, H, W)
         x = self.blocks1(x)
+        return x
 
-        x = x.permute(0, 3, 1, 2)
+    def forward_features_2(self, x):
+        x = x.permute(0, 3, 1, 2).to(self.dev1)
         x = self.patch_embed2(x)
         B, H, W, C = x.shape
         x = x + self._get_pos_embed(self.pos_embed2, self.num_patches2, H, W)
         x = self.blocks2(x)
+        return x
 
-        x = x.permute(0, 3, 1, 2)
+    def forward_features_3(self, x):
+        x = x.permute(0, 3, 1, 2).to(self.dev2)
         x = self.patch_embed3(x)
         B, H, W, C = x.shape
         x = x + self._get_pos_embed(self.pos_embed3, self.num_patches3, H, W)
         x = self.blocks3(x)
+        return x
 
-        x = x.permute(0, 3, 1, 2)
+    def forward_features_4(self, x):
+        x = x.permute(0, 3, 1, 2).to(self.dev3)
         x = self.patch_embed4(x)
         B, H, W, C = x.shape
         x = x + self._get_pos_embed(self.pos_embed4, self.num_patches4, H, W)
         x = self.blocks4(x)
         x = x.flatten(1, 2)
 
+        x = x.to(self.dev0)
         x = self.norm(x)
         return x.mean(1)
 
     def forward(self, x):
-        x = self.forward_features(x)
-        x = self.head(x)
-        return x
+        # *** Not using ThreadPoolExecutor is actually faster ***
+        split_size = 20
+        x_split = torch.split(x, split_size, dim=0)
+        x_split_iter = iter(x_split)
+        outputs = []
 
+        # we have four layers, so using x1, x2, x3 as intermediate results
+        # x3 is output from the 3rd layer, cloest to the output and x1 is cloest to the input
+        x1 = self.forward_features_1(next(x_split_iter))
+        x2 = x3 = None
 
-def _init_vit_weights(module: nn.Module, name: str = '', head_bias: float = 0.):
-    """ ViT weight initialization
-    * When called without n, head_bias, jax_impl args it will behave exactly the same
-      as my original init for compatibility with prev hparam / downstream use cases (ie DeiT).
-    """
-    if isinstance(module, nn.Linear):
-        if name.startswith('head'):
-            nn.init.zeros_(module.weight)
-            nn.init.constant_(module.bias, head_bias)
-        elif name.startswith('pre_logits'):
-            lecun_normal_(module.weight)
-            nn.init.zeros_(module.bias)
-        else:
-            trunc_normal_(module.weight, std=.02)
-            if module.bias is not None:
-                nn.init.zeros_(module.bias)
-    elif isinstance(module, (nn.LayerNorm, nn.GroupNorm, nn.BatchNorm2d)):
-        nn.init.zeros_(module.bias)
-        nn.init.ones_(module.weight)
-    elif isinstance(module, nn.Conv2d):
-        trunc_normal_(module.weight, std=.02)
-        if module.bias is not None:
-            nn.init.constant_(module.bias, 0)
+        while x1 != None or x2 != None or x3 != None:
+            if x3 != None:
+                outputs.append(self.forward_features_4(x3))
+                x3 = None
 
+            if x2 != None:
+                x3 = self.forward_features_3(x2)
+                x2 = None
+
+            if x1 != None:
+                x2 = self.forward_features_2(x1)
+                try:
+                    x1 = self.forward_features_1(next(x_split_iter))
+                except:
+                    x1 = None
+
+        output = torch.cat(outputs, dim=0)
+        final_output = self.head(output)
+
+        return final_output
 
 @register_model
-def iformer_small(pretrained=False, **kwargs):
+def pipe_iformer_small(dev0, dev1, dev2, dev3, pretrained=False, **kwargs):
     """
     19.866M  4.849G 83.382
     """
@@ -536,7 +592,12 @@ def iformer_small(pretrained=False, **kwargs):
     num_heads = [3, 6, 10, 12]
     attention_heads = [1] * 3 + [3] * 3 + [7] * 4 + [9] * 5 + [11] * 3
 
-    model = InceptionTransformer(img_size=224,
+    model = PipeInceptionTransformer(
+                                 dev0 = dev0,
+                                 dev1 = dev1,
+                                 dev2 = dev2,
+                                 dev3 = dev3,
+                                 img_size=224,
                                  depths=depths,
                                  embed_dims=embed_dims,
                                  num_heads=num_heads,
@@ -544,122 +605,6 @@ def iformer_small(pretrained=False, **kwargs):
                                  use_layer_scale=True, layer_scale_init_value=1e-6,
                                  **kwargs)
     model.default_cfg = default_cfgs['iformer_small']
-    if pretrained:
-        url = model.default_cfg['url']
-        checkpoint = torch.hub.load_state_dict_from_url(url=url, map_location="cpu", check_hash=True)
-        model.load_state_dict(checkpoint)
-    return model
-
-
-@register_model
-def iformer_small_384(pretrained=False, **kwargs):
-    depths = [3, 3, 9, 3]
-    embed_dims = [96, 192, 320, 384]
-    num_heads = [3, 6, 10, 12]
-    attention_heads = [1] * 3 + [3] * 3 + [7] * 4 + [9] * 5 + [11] * 3
-
-    model = InceptionTransformer(img_size=384,
-                                 depths=depths,
-                                 embed_dims=embed_dims,
-                                 num_heads=num_heads,
-                                 attention_heads=attention_heads,
-                                 use_layer_scale=True, layer_scale_init_value=1e-6,
-                                 **kwargs)
-    model.default_cfg = default_cfgs['iformer_small_384']
-    if pretrained:
-        url = model.default_cfg['url']
-        checkpoint = torch.hub.load_state_dict_from_url(url=url, map_location="cpu", check_hash=True)
-        model.load_state_dict(checkpoint)
-    return model
-
-
-@register_model
-def iformer_base(pretrained=False, **kwargs):
-    """
-    47.866M  9.379G  84.598
-    """
-    depths = [4, 6, 14, 6]
-    embed_dims = [96, 192, 384, 512]
-    num_heads = [3, 6, 12, 16]
-    attention_heads = [1] * 4 + [3] * 6 + [8] * 7 + [10] * 7 + [15] * 6
-
-    model = InceptionTransformer(img_size=224,
-                                 depths=depths,
-                                 embed_dims=embed_dims,
-                                 num_heads=num_heads,
-                                 attention_heads=attention_heads,
-                                 use_layer_scale=True, layer_scale_init_value=1e-6,
-                                 **kwargs)
-    model.default_cfg = default_cfgs['iformer_base']
-    if pretrained:
-        url = model.default_cfg['url']
-        checkpoint = torch.hub.load_state_dict_from_url(url=url, map_location="cpu", check_hash=True)
-        model.load_state_dict(checkpoint)
-    return model
-
-
-@register_model
-def iformer_base_384(pretrained=False, **kwargs):
-    depths = [4, 6, 14, 6]
-    embed_dims = [96, 192, 384, 512]
-    num_heads = [3, 6, 12, 16]
-    attention_heads = [1] * 4 + [3] * 6 + [8] * 7 + [10] * 7 + [15] * 6
-
-    model = InceptionTransformer(img_size=384,
-                                 depths=depths,
-                                 embed_dims=embed_dims,
-                                 num_heads=num_heads,
-                                 attention_heads=attention_heads,
-                                 use_layer_scale=True, layer_scale_init_value=1e-6,
-                                 **kwargs)
-    model.default_cfg = default_cfgs['iformer_base_384']
-    if pretrained:
-        url = model.default_cfg['url']
-        checkpoint = torch.hub.load_state_dict_from_url(url=url, map_location="cpu", check_hash=True)
-        model.load_state_dict(checkpoint)
-    return model
-
-
-@register_model
-def iformer_large(pretrained=False, **kwargs):
-    """
-    86.637M  14.048G 84.752
-    """
-    depths = [4, 6, 18, 8]
-    embed_dims = [96, 192, 448, 640]
-    num_heads = [3, 6, 14, 20]
-    attention_heads = [1] * 4 + [3] * 6 + [10] * 9 + [12] * 9 + [19] * 8
-
-    model = InceptionTransformer(img_size=224,
-                                 depths=depths,
-                                 embed_dims=embed_dims,
-                                 num_heads=num_heads,
-                                 attention_heads=attention_heads,
-                                 use_layer_scale=True, layer_scale_init_value=1e-6,
-                                 **kwargs)
-    model.default_cfg = default_cfgs['iformer_large']
-    if pretrained:
-        url = model.default_cfg['url']
-        checkpoint = torch.hub.load_state_dict_from_url(url=url, map_location="cpu", check_hash=True)
-        model.load_state_dict(checkpoint)
-    return model
-
-
-@register_model
-def iformer_large_384(pretrained=False, **kwargs):
-    depths = [4, 6, 18, 8]
-    embed_dims = [96, 192, 448, 640]
-    num_heads = [3, 6, 14, 20]
-    attention_heads = [1] * 4 + [3] * 6 + [10] * 9 + [12] * 9 + [19] * 8
-
-    model = InceptionTransformer(img_size=384,
-                                 depths=depths,
-                                 embed_dims=embed_dims,
-                                 num_heads=num_heads,
-                                 attention_heads=attention_heads,
-                                 use_layer_scale=True, layer_scale_init_value=1e-6,
-                                 **kwargs)
-    model.default_cfg = default_cfgs['iformer_large_384']
     if pretrained:
         url = model.default_cfg['url']
         checkpoint = torch.hub.load_state_dict_from_url(url=url, map_location="cpu", check_hash=True)

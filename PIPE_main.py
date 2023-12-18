@@ -10,7 +10,7 @@ from torchvision import transforms
 from torch.utils.data import Dataset
 
 from dataset import Customized_CIFAR10_Dataset
-from model import pipe_iformer_small
+from pipe_model import pipe_iformer_small
 
 from dotenv import load_dotenv
 
